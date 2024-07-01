@@ -26,6 +26,12 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include <pcl/pcl_config.h>
+#if PCL_VERSION_COMPARE(>=, 1, 8, 0)
+// Should be first on windows to avoid "WinSock.h has already been included" error
+#include "rtabmap/core/lidar/LidarVLP16.h"
+#endif
+
 #include "rtabmap/gui/PreferencesDialog.h"
 #include "rtabmap/gui/DatabaseViewer.h"
 #include "rtabmap/gui/OdometryViewer.h"
@@ -56,9 +62,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/core/Odometry.h"
 #include "rtabmap/core/OdometryThread.h"
 #include "rtabmap/core/CameraRGBD.h"
-#include "rtabmap/core/CameraThread.h"
 #include "rtabmap/core/CameraRGB.h"
 #include "rtabmap/core/CameraStereo.h"
+#include "rtabmap/core/IMUFilter.h"
 #include "rtabmap/core/IMUThread.h"
 #include "rtabmap/core/Memory.h"
 #include "rtabmap/core/VWDictionary.h"
@@ -84,7 +90,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/utilite/UEventsManager.h>
 #include "rtabmap/utilite/UPlot.h"
 
+// Presets
+#include "camera_tof_icp_ini.h"
+#include "lidar3d_icp_ini.h"
+
 #include <opencv2/opencv_modules.hpp>
+#include <rtabmap/core/SensorCaptureThread.h>
 #if CV_MAJOR_VERSION < 3
 #ifdef HAVE_OPENCV_GPU
   #include <opencv2/gpu/gpu.hpp>
@@ -411,6 +422,11 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	{
 		_ui->comboBox_cameraStereo->setItemData(kSrcStereoDepthAI - kSrcStereo, 0, Qt::UserRole - 1);
 	}
+	if (!CameraSeerSense::available())
+	{
+		_ui->comboBox_cameraRGBD->setItemData(kSrcSeerSense - kSrcRGBD, 0, Qt::UserRole - 1);
+		_ui->comboBox_odom_sensor->setItemData(3, 0, Qt::UserRole - 1);
+	}
 	_ui->openni2_exposure->setEnabled(CameraOpenNI2::exposureGainAvailable());
 	_ui->openni2_gain->setEnabled(CameraOpenNI2::exposureGainAvailable());
 
@@ -445,6 +461,9 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	connect(_ui->source_comboBox_image_type, SIGNAL(currentIndexChanged(int)), this, SLOT(updateSourceGrpVisibility()));
 	connect(_ui->comboBox_cameraStereo, SIGNAL(currentIndexChanged(int)), this, SLOT(updateSourceGrpVisibility()));
 	connect(_ui->comboBox_imuFilter_strategy, SIGNAL(currentIndexChanged(int)), this, SLOT(updateSourceGrpVisibility()));
+	connect(_ui->comboBox_odom_sensor, SIGNAL(currentIndexChanged(int)), this, SLOT(updateSourceGrpVisibility()));
+	connect(_ui->comboBox_lidar_src, SIGNAL(currentIndexChanged(int)), this, SLOT(updateSourceGrpVisibility()));
+	connect(_ui->checkBox_source_scanFromDepth, SIGNAL(stateChanged(int)), this, SLOT(updateSourceGrpVisibility()));
 	this->resetSettings(_ui->groupBox_source0);
 
 	_ui->predictionPlot->showLegend(false);
@@ -459,9 +478,12 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	connect(_ui->pushButton_loadConfig, SIGNAL(clicked()), this, SLOT(loadConfigFrom()));
 	connect(_ui->pushButton_saveConfig, SIGNAL(clicked()), this, SLOT(saveConfigTo()));
 	connect(_ui->pushButton_resetConfig, SIGNAL(clicked()), this, SLOT(resetConfig()));
+	connect(_ui->pushButton_presets_camera_tof_icp, SIGNAL(clicked()), this, SLOT(loadPreset()));
+	connect(_ui->pushButton_presets_lidar_3d_icp, SIGNAL(clicked()), this, SLOT(loadPreset()));
 	connect(_ui->radioButton_basic, SIGNAL(toggled(bool)), this, SLOT(setupTreeView()));
 	connect(_ui->pushButton_testOdometry, SIGNAL(clicked()), this, SLOT(testOdometry()));
 	connect(_ui->pushButton_test_camera, SIGNAL(clicked()), this, SLOT(testCamera()));
+	connect(_ui->pushButton_test_lidar, SIGNAL(clicked()), this, SLOT(testLidar()));
 
 	// General panel
 	connect(_ui->general_checkBox_imagesKept, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteGeneralPanel()));
@@ -626,6 +648,7 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	connect(_ui->doubleSpinBox_subtractFilteringRadius, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteCloudRenderingPanel()));
 	connect(_ui->doubleSpinBox_subtractFilteringAngle, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteCloudRenderingPanel()));
 
+	connect(_ui->doubleSpinBox_map_resolution, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteCloudRenderingPanel()));
 	connect(_ui->checkBox_map_shown, SIGNAL(clicked(bool)), this, SLOT(makeObsoleteCloudRenderingPanel()));
 	connect(_ui->doubleSpinBox_map_opacity, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteCloudRenderingPanel()));
 	connect(_ui->checkBox_elevation_shown, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteCloudRenderingPanel()));
@@ -861,6 +884,7 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	connect(_ui->lineEdit_odomSourceDevice, SIGNAL(textChanged(const QString &)), this, SLOT(makeObsoleteSourcePanel()));
 	connect(_ui->doubleSpinBox_odom_sensor_time_offset, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteSourcePanel()));
 	connect(_ui->doubleSpinBox_odom_sensor_scale_factor, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->doubleSpinBox_odom_sensor_wait_time, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteSourcePanel()));
 	connect(_ui->checkBox_odom_sensor_use_as_gt, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
 
 	connect(_ui->comboBox_imuFilter_strategy, SIGNAL(currentIndexChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
@@ -869,6 +893,10 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	connect(_ui->checkBox_imuFilter_baseFrameConversion, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
 	connect(_ui->checkbox_publishInterIMU, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
 
+	connect(_ui->comboBox_lidar_src, SIGNAL(currentIndexChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->comboBox_lidar_src, SIGNAL(currentIndexChanged(int)), _ui->stackedWidget_lidar_src, SLOT(setCurrentIndex(int)));
+	_ui->stackedWidget_lidar_src->setCurrentIndex(_ui->comboBox_lidar_src->currentIndex());
+	connect(_ui->checkBox_source_scanDeskewing, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
 	connect(_ui->checkBox_source_scanFromDepth, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
 	connect(_ui->spinBox_source_scanDownsampleStep, SIGNAL(valueChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
 	connect(_ui->doubleSpinBox_source_scanRangeMin, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteSourcePanel()));
@@ -878,6 +906,17 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	connect(_ui->doubleSpinBox_source_scanNormalsRadius, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteSourcePanel()));
 	connect(_ui->doubleSpinBox_source_scanNormalsForceGroundUp, SIGNAL(valueChanged(double)), this, SLOT(makeObsoleteSourcePanel()));
 
+	connect(_ui->lineEdit_lidar_local_transform, SIGNAL(textChanged(const QString &)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->toolButton_vlp16_pcap_path, SIGNAL(clicked()), this, SLOT(selectVlp16PcapPath()));
+	connect(_ui->lineEdit_vlp16_pcap_path, SIGNAL(textChanged(const QString &)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->spinBox_vlp16_ip1, SIGNAL(valueChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->spinBox_vlp16_ip2, SIGNAL(valueChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->spinBox_vlp16_ip2, SIGNAL(valueChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->spinBox_vlp16_ip4, SIGNAL(valueChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->spinBox_vlp16_port, SIGNAL(valueChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->checkBox_vlp16_organized, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->checkBox_vlp16_hostTime, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
+	connect(_ui->checkBox_vlp16_stamp_last, SIGNAL(stateChanged(int)), this, SLOT(makeObsoleteSourcePanel()));
 
 	//Rtabmap basic
 	connect(_ui->general_doubleSpinBox_timeThr, SIGNAL(valueChanged(double)), _ui->general_doubleSpinBox_timeThr_2, SLOT(setValue(double)));
@@ -971,7 +1010,9 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 
 	// Create hypotheses
 	_ui->general_doubleSpinBox_hardThr->setObjectName(Parameters::kRtabmapLoopThr().c_str());
+	_ui->general_doubleSpinBox_agressiveThr->setObjectName(Parameters::kRGBDAggressiveLoopThr().c_str());
 	_ui->general_doubleSpinBox_loopRatio->setObjectName(Parameters::kRtabmapLoopRatio().c_str());
+	_ui->comboBox_virtualPlaceLikelihoodRatio->setObjectName(Parameters::kRtabmapVirtualPlaceLikelihoodRatio().c_str());
 	_ui->comboBox_globalDescriptorExtractor->setObjectName(Parameters::kMemGlobalDescriptorStrategy().c_str());
 	connect(_ui->comboBox_globalDescriptorExtractor, SIGNAL(currentIndexChanged(int)), this, SLOT(updateGlobalDescriptorVisibility()));
 
@@ -994,6 +1035,7 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	_ui->checkBox_memDepthAsMask->setObjectName(Parameters::kMemDepthAsMask().c_str());
 	_ui->checkBox_memStereoFromMotion->setObjectName(Parameters::kMemStereoFromMotion().c_str());
 	_ui->surf_spinBox_wordsPerImageTarget->setObjectName(Parameters::kKpMaxFeatures().c_str());
+	_ui->checkBox_kp_ssc->setObjectName(Parameters::kKpSSC().c_str());
 	_ui->spinBox_KPGridRows->setObjectName(Parameters::kKpGridRows().c_str());
 	_ui->spinBox_KPGridCols->setObjectName(Parameters::kKpGridCols().c_str());
 	_ui->surf_doubleSpinBox_ratioBadSign->setObjectName(Parameters::kKpBadSignRatio().c_str());
@@ -1210,9 +1252,10 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	connect(_ui->reextract_nn, SIGNAL(currentIndexChanged(int)), this, SLOT(updateFeatureMatchingVisibility()));
 	_ui->reextract_nndrRatio->setObjectName(Parameters::kVisCorNNDR().c_str());
 	_ui->spinBox_visCorGuessWinSize->setObjectName(Parameters::kVisCorGuessWinSize().c_str());
-	_ui->checkBox__visCorGuessMatchToProjection->setObjectName(Parameters::kVisCorGuessMatchToProjection().c_str());
+	_ui->checkBox_visCorGuessMatchToProjection->setObjectName(Parameters::kVisCorGuessMatchToProjection().c_str());
 	_ui->vis_feature_detector->setObjectName(Parameters::kVisFeatureType().c_str());
 	_ui->reextract_maxFeatures->setObjectName(Parameters::kVisMaxFeatures().c_str());
+	_ui->checkBox_visSSC->setObjectName(Parameters::kVisSSC().c_str());
 	_ui->reextract_gridrows->setObjectName(Parameters::kVisGridRows().c_str());
 	_ui->reextract_gridcols->setObjectName(Parameters::kVisGridCols().c_str());
 	_ui->loopClosure_bowMaxDepth->setObjectName(Parameters::kVisMaxDepth().c_str());
@@ -1238,6 +1281,7 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	_ui->loopClosure_icpDownsamplingStep->setObjectName(Parameters::kIcpDownsamplingStep().c_str());
 	_ui->loopClosure_icpRangeMin->setObjectName(Parameters::kIcpRangeMin().c_str());
 	_ui->loopClosure_icpRangeMax->setObjectName(Parameters::kIcpRangeMax().c_str());
+	_ui->loopClosure_icpFiltersEnabled->setObjectName(Parameters::kIcpFiltersEnabled().c_str());
 	_ui->loopClosure_icpMaxCorrespondenceDistance->setObjectName(Parameters::kIcpMaxCorrespondenceDistance().c_str());
 	_ui->loopClosure_icpReciprocalCorrespondences->setObjectName(Parameters::kIcpReciprocalCorrespondences().c_str());
 	_ui->loopClosure_icpIterations->setObjectName(Parameters::kIcpIterations().c_str());
@@ -1322,6 +1366,7 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	_ui->odom_guess_smoothing_delay->setObjectName(Parameters::kOdomGuessSmoothingDelay().c_str());
 	_ui->odom_imageDecimation->setObjectName(Parameters::kOdomImageDecimation().c_str());
 	_ui->odom_alignWithGround->setObjectName(Parameters::kOdomAlignWithGround().c_str());
+	_ui->odom_lidar_deskewing->setObjectName(Parameters::kOdomDeskewing().c_str());
 
 	//Odometry Frame to Map
 	_ui->odom_localHistory->setObjectName(Parameters::kOdomF2MMaxSize().c_str());
@@ -2005,6 +2050,7 @@ void PreferencesDialog::resetSettings(QGroupBox * groupBox)
 	}
 	else if(groupBox->objectName() == _ui->groupBox_gridMap2->objectName())
 	{
+		_ui->doubleSpinBox_map_resolution->setValue(0);
 		_ui->checkBox_map_shown->setChecked(false);
 		_ui->doubleSpinBox_map_opacity->setValue(0.75);
 		_ui->checkBox_elevation_shown->setCheckState(Qt::Unchecked);
@@ -2206,6 +2252,7 @@ void PreferencesDialog::resetSettings(QGroupBox * groupBox)
 		_ui->lineEdit_odomSourceDevice->setText("");
 		_ui->doubleSpinBox_odom_sensor_time_offset->setValue(0.0);
 		_ui->doubleSpinBox_odom_sensor_scale_factor->setValue(1);
+		_ui->doubleSpinBox_odom_sensor_wait_time->setValue(100);
 		_ui->checkBox_odom_sensor_use_as_gt->setChecked(false);
 
 		_ui->comboBox_imuFilter_strategy->setCurrentIndex(2);
@@ -2218,6 +2265,8 @@ void PreferencesDialog::resetSettings(QGroupBox * groupBox)
 		_ui->checkBox_imuFilter_baseFrameConversion->setChecked(true);
 		_ui->checkbox_publishInterIMU->setChecked(false);
 
+		_ui->comboBox_lidar_src->setCurrentIndex(0);
+		_ui->checkBox_source_scanDeskewing->setChecked(false);
 		_ui->checkBox_source_scanFromDepth->setChecked(false);
 		_ui->spinBox_source_scanDownsampleStep->setValue(1);
 		_ui->doubleSpinBox_source_scanRangeMin->setValue(0);
@@ -2226,6 +2275,17 @@ void PreferencesDialog::resetSettings(QGroupBox * groupBox)
 		_ui->spinBox_source_scanNormalsK->setValue(0);
 		_ui->doubleSpinBox_source_scanNormalsRadius->setValue(0.0);
 		_ui->doubleSpinBox_source_scanNormalsForceGroundUp->setValue(0);
+
+		_ui->lineEdit_lidar_local_transform->setText("0 0 0 0 0 0");
+		_ui->lineEdit_vlp16_pcap_path->clear();
+		_ui->spinBox_vlp16_ip1->setValue(192);
+		_ui->spinBox_vlp16_ip2->setValue(168);
+		_ui->spinBox_vlp16_ip3->setValue(1);
+		_ui->spinBox_vlp16_ip4->setValue(201);
+		_ui->spinBox_vlp16_port->setValue(2368);
+		_ui->checkBox_vlp16_organized->setChecked(false);
+		_ui->checkBox_vlp16_hostTime->setChecked(true);
+		_ui->checkBox_vlp16_stamp_last->setChecked(true);
 
 		_ui->groupBox_depthFromScan->setChecked(false);
 		_ui->groupBox_depthFromScan_fillHoles->setChecked(true);
@@ -2490,6 +2550,7 @@ void PreferencesDialog::readGuiSettings(const QString & filePath)
 	_ui->doubleSpinBox_subtractFilteringRadius->setValue(settings.value("subtractFilteringRadius", _ui->doubleSpinBox_subtractFilteringRadius->value()).toDouble());
 	_ui->doubleSpinBox_subtractFilteringAngle->setValue(settings.value("subtractFilteringAngle", _ui->doubleSpinBox_subtractFilteringAngle->value()).toDouble());
 
+	_ui->doubleSpinBox_map_resolution->setValue(settings.value("gridUIResolution", _ui->doubleSpinBox_map_resolution->value()).toDouble());
 	_ui->checkBox_map_shown->setChecked(settings.value("gridMapShown", _ui->checkBox_map_shown->isChecked()).toBool());
 	_ui->doubleSpinBox_map_opacity->setValue(settings.value("gridMapOpacity", _ui->doubleSpinBox_map_opacity->value()).toDouble());
 	_ui->checkBox_elevation_shown->setCheckState((Qt::CheckState)settings.value("elevationMapShown", _ui->checkBox_elevation_shown->checkState()).toInt());
@@ -2712,6 +2773,7 @@ void PreferencesDialog::readCameraSettings(const QString & filePath)
 	_ui->lineEdit_odomSourceDevice->setText(settings.value("odom_sensor_device", _ui->lineEdit_odomSourceDevice->text()).toString());
 	_ui->doubleSpinBox_odom_sensor_time_offset->setValue(settings.value("odom_sensor_offset_time", _ui->doubleSpinBox_odom_sensor_time_offset->value()).toDouble());
 	_ui->doubleSpinBox_odom_sensor_scale_factor->setValue(settings.value("odom_sensor_scale_factor", _ui->doubleSpinBox_odom_sensor_scale_factor->value()).toDouble());
+	_ui->doubleSpinBox_odom_sensor_wait_time->setValue(settings.value("odom_sensor_wait_time", _ui->doubleSpinBox_odom_sensor_wait_time->value()).toDouble());
 	_ui->checkBox_odom_sensor_use_as_gt->setChecked(settings.value("odom_sensor_odom_as_gt", _ui->checkBox_odom_sensor_use_as_gt->isChecked()).toBool());
 	settings.endGroup(); // OdomSensor
 
@@ -2737,6 +2799,8 @@ void PreferencesDialog::readCameraSettings(const QString & filePath)
 	settings.endGroup();//IMU
 
 	settings.beginGroup("Scan");
+	_ui->comboBox_lidar_src->setCurrentIndex(settings.value("source", _ui->comboBox_lidar_src->currentIndex()).toInt());
+	_ui->checkBox_source_scanDeskewing->setChecked(settings.value("deskewing", _ui->checkBox_source_scanDeskewing->isChecked()).toBool());
 	_ui->checkBox_source_scanFromDepth->setChecked(settings.value("fromDepth", _ui->checkBox_source_scanFromDepth->isChecked()).toBool());
 	_ui->spinBox_source_scanDownsampleStep->setValue(settings.value("downsampleStep", _ui->spinBox_source_scanDownsampleStep->value()).toInt());
 	_ui->doubleSpinBox_source_scanRangeMin->setValue(settings.value("rangeMin", _ui->doubleSpinBox_source_scanRangeMin->value()).toDouble());
@@ -2770,6 +2834,23 @@ void PreferencesDialog::readCameraSettings(const QString & filePath)
 	settings.endGroup(); // Database
 
 	settings.endGroup(); // Camera
+
+	settings.beginGroup("Lidar");
+
+	settings.beginGroup("VLP16");
+	_ui->lineEdit_lidar_local_transform->setText(settings.value("localTransform",_ui->lineEdit_lidar_local_transform->text()).toString());
+	_ui->lineEdit_vlp16_pcap_path->setText(settings.value("pcapPath",_ui->lineEdit_vlp16_pcap_path->text()).toString());
+	_ui->spinBox_vlp16_ip1->setValue(settings.value("ip1", _ui->spinBox_vlp16_ip1->value()).toInt());
+	_ui->spinBox_vlp16_ip2->setValue(settings.value("ip2", _ui->spinBox_vlp16_ip2->value()).toInt());
+	_ui->spinBox_vlp16_ip3->setValue(settings.value("ip3", _ui->spinBox_vlp16_ip3->value()).toInt());
+	_ui->spinBox_vlp16_ip4->setValue(settings.value("ip4", _ui->spinBox_vlp16_ip4->value()).toInt());
+	_ui->spinBox_vlp16_port->setValue(settings.value("port", _ui->spinBox_vlp16_port->value()).toInt());
+	_ui->checkBox_vlp16_organized->setChecked(settings.value("organized", _ui->checkBox_vlp16_organized->isChecked()).toBool());
+	_ui->checkBox_vlp16_hostTime->setChecked(settings.value("hostTime", _ui->checkBox_vlp16_hostTime->isChecked()).toBool());
+	_ui->checkBox_vlp16_stamp_last->setChecked(settings.value("stampLast", _ui->checkBox_vlp16_stamp_last->isChecked()).toBool());
+	settings.endGroup(); // VLP16
+
+	settings.endGroup(); // Lidar
 
 	_calibrationDialog->loadSettings(settings, "CalibrationDialog");
 
@@ -2893,6 +2974,45 @@ void PreferencesDialog::resetConfig()
 
 		_calibrationDialog->resetSettings();
 	}
+}
+
+void PreferencesDialog::loadPreset(const std::string & presetHexHeader)
+{
+	ParametersMap parameters = Parameters::getDefaultParameters();
+	if(!presetHexHeader.empty())
+	{
+		Parameters::readINIStr(uHex2Str(presetHexHeader), parameters);
+	}
+
+	// Reset 3D rendering panel
+	this->resetSettings(1);
+	// Update parameters
+	parameters.erase(Parameters::kRtabmapWorkingDirectory());
+	for(ParametersMap::iterator iter=parameters.begin(); iter!=parameters.end(); ++iter)
+	{
+		this->setParameter(iter->first, iter->second);
+	}
+}
+
+void PreferencesDialog::loadPreset()
+{
+	if(sender() == _ui->pushButton_presets_camera_tof_icp)
+	{
+		loadPreset(CAMERA_TOF_ICP_INI);
+	}
+	else if(sender() == _ui->pushButton_presets_lidar_3d_icp)
+	{
+		loadPreset(LIDAR3D_ICP_INI);
+	}
+	else
+	{
+		UERROR("Unknown sender!");
+		return;
+	}
+	QMessageBox::information(this,
+			tr("Preset"),
+			tr("Loaded \"%1\" preset!").arg(((QPushButton*)sender())->text()),
+			QMessageBox::Ok);
 }
 
 void PreferencesDialog::writeSettings(const QString & filePath)
@@ -3033,6 +3153,7 @@ void PreferencesDialog::writeGuiSettings(const QString & filePath) const
 	settings.setValue("subtractFilteringRadius", _ui->doubleSpinBox_subtractFilteringRadius->value());
 	settings.setValue("subtractFilteringAngle",  _ui->doubleSpinBox_subtractFilteringAngle->value());
 
+	settings.setValue("gridUIResolution",            _ui->doubleSpinBox_map_resolution->value());
 	settings.setValue("gridMapShown",                _ui->checkBox_map_shown->isChecked());
 	settings.setValue("gridMapOpacity",              _ui->doubleSpinBox_map_opacity->value());
 	settings.setValue("elevationMapShown",           _ui->checkBox_elevation_shown->checkState());
@@ -3250,6 +3371,7 @@ void PreferencesDialog::writeCameraSettings(const QString & filePath) const
 	settings.setValue("odom_sensor_device",     _ui->lineEdit_odomSourceDevice->text());
 	settings.setValue("odom_sensor_offset_time", _ui->doubleSpinBox_odom_sensor_time_offset->value());
 	settings.setValue("odom_sensor_scale_factor", _ui->doubleSpinBox_odom_sensor_scale_factor->value());
+	settings.setValue("odom_sensor_wait_time", _ui->doubleSpinBox_odom_sensor_wait_time->value());
 	settings.setValue("odom_sensor_odom_as_gt", _ui->checkBox_odom_sensor_use_as_gt->isChecked());
 	settings.endGroup(); // OdomSensor
 
@@ -3275,6 +3397,8 @@ void PreferencesDialog::writeCameraSettings(const QString & filePath) const
 	settings.endGroup();//IMU
 
 	settings.beginGroup("Scan");
+	settings.setValue("source", 			_ui->comboBox_lidar_src->currentIndex());
+	settings.setValue("deskewing",          _ui->checkBox_source_scanDeskewing->isChecked());
 	settings.setValue("fromDepth", 			_ui->checkBox_source_scanFromDepth->isChecked());
 	settings.setValue("downsampleStep", 	_ui->spinBox_source_scanDownsampleStep->value());
 	settings.setValue("rangeMin", 			_ui->doubleSpinBox_source_scanRangeMin->value());
@@ -3308,6 +3432,23 @@ void PreferencesDialog::writeCameraSettings(const QString & filePath) const
 	settings.endGroup(); // Database
 
 	settings.endGroup(); // Camera
+
+	settings.beginGroup("Lidar");
+
+	settings.beginGroup("VLP16");
+	settings.setValue("localTransform",_ui->lineEdit_lidar_local_transform->text());
+	settings.setValue("pcapPath",_ui->lineEdit_vlp16_pcap_path->text());
+	settings.setValue("ip1", _ui->spinBox_vlp16_ip1->value());
+	settings.setValue("ip2", _ui->spinBox_vlp16_ip2->value());
+	settings.setValue("ip3", _ui->spinBox_vlp16_ip3->value());
+	settings.setValue("ip4", _ui->spinBox_vlp16_ip4->value());
+	settings.setValue("port", _ui->spinBox_vlp16_port->value());
+	settings.setValue("organized", _ui->checkBox_vlp16_organized->isChecked());
+	settings.setValue("hostTime", _ui->checkBox_vlp16_hostTime->isChecked());
+	settings.setValue("stampLast", _ui->checkBox_vlp16_stamp_last->isChecked());
+	settings.endGroup(); // VLP16
+
+	settings.endGroup(); // Lidar
 
 	_calibrationDialog->saveSettings(settings, "CalibrationDialog");
 }
@@ -4045,6 +4186,9 @@ void PreferencesDialog::updateParameters(const ParametersMap & parameters, bool 
 
 void PreferencesDialog::selectSourceDriver(Src src, int variant)
 {
+	Src previousCameraSrc = getSourceDriver();
+	Src previousLidarSrc = getLidarSourceDriver();
+
 	if(_ui->comboBox_imuFilter_strategy->currentIndex()==0)
 	{
 		_ui->comboBox_imuFilter_strategy->setCurrentIndex(2);
@@ -4113,9 +4257,32 @@ void PreferencesDialog::selectSourceDriver(Src src, int variant)
 		_ui->comboBox_sourceType->setCurrentIndex(2);
 		_ui->source_comboBox_image_type->setCurrentIndex(src - kSrcRGB);
 	}
-	else if(src >= kSrcDatabase)
+	else if(src == kSrcDatabase)
 	{
 		_ui->comboBox_sourceType->setCurrentIndex(3);
+	}
+	else if(src >= kSrcLidar)
+	{
+		_ui->comboBox_lidar_src->setCurrentIndex(kSrcLidarVLP16 - kSrcLidar + 1);
+	}
+
+	if(previousCameraSrc == kSrcUndef && src < kSrcDatabase &&
+			QMessageBox::question(this, tr("Camera Source..."),
+			tr("Do you want to use default camera settings?"),
+			QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes)
+	{
+		loadPreset("");
+		_ui->comboBox_lidar_src->setCurrentIndex(0); // Set Lidar to None;
+		_ui->comboBox_odom_sensor->setCurrentIndex(0); // Set odom sensor to None
+	}
+	else if(previousLidarSrc== kSrcUndef && src >= kSrcLidar &&
+			QMessageBox::question(this, tr("LiDAR Source..."),
+			tr("Do you want to use \"LiDAR 3D ICP\" preset?"),
+			QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes)
+	{
+		loadPreset(LIDAR3D_ICP_INI);
+		_ui->comboBox_sourceType->setCurrentIndex(4); // Set camera to None;
+		_ui->comboBox_odom_sensor->setCurrentIndex(0); // Set odom sensor to No
 	}
 
 	if(validateForm())
@@ -4567,6 +4734,20 @@ void PreferencesDialog::selectSourceDepthaiBlobPath()
 	}
 }
 
+void PreferencesDialog::selectVlp16PcapPath()
+{
+	QString dir = _ui->lineEdit_vlp16_pcap_path->text();
+	if (dir.isEmpty())
+	{
+		dir = getWorkingDirectory();
+	}
+	QString path = QFileDialog::getOpenFileName(this, tr("Select file"), dir, tr("Velodyne recording (*.pcap)"));
+	if (!path.isEmpty())
+	{
+		_ui->lineEdit_vlp16_pcap_path->setText(path);
+	}
+}
+
 void PreferencesDialog::setParameter(const std::string & key, const std::string & value)
 {
 	UDEBUG("%s=%s", key.c_str(), value.c_str());
@@ -4964,6 +5145,7 @@ void PreferencesDialog::updateBasicParameter()
 	{
         _ui->general_checkBox_activateRGBD->blockSignals(true);
 		_ui->general_checkBox_activateRGBD->setChecked(_ui->general_checkBox_activateRGBD_2->isChecked());
+		addParameter(_ui->general_checkBox_activateRGBD, _ui->general_checkBox_activateRGBD->isChecked());
         _ui->general_checkBox_activateRGBD->blockSignals(false);
 	}
 	else if(sender() == _ui->general_checkBox_SLAM_mode)
@@ -4976,6 +5158,7 @@ void PreferencesDialog::updateBasicParameter()
 	{
         _ui->general_checkBox_SLAM_mode->blockSignals(true);
 		_ui->general_checkBox_SLAM_mode->setChecked(_ui->general_checkBox_SLAM_mode_2->isChecked());
+		addParameter(_ui->general_checkBox_SLAM_mode, _ui->general_checkBox_SLAM_mode->isChecked());
         _ui->general_checkBox_SLAM_mode->blockSignals(false);
 	}
 	else
@@ -5010,7 +5193,14 @@ void PreferencesDialog::makeObsoleteLoggingPanel()
 
 void PreferencesDialog::makeObsoleteSourcePanel()
 {
+	ULOGGER_DEBUG("");
 	_obsoletePanels = _obsoletePanels | kPanelSource;
+}
+
+void PreferencesDialog::makeObsoleteCalibrationPanel()
+{
+	ULOGGER_DEBUG("");
+	_obsoletePanels = _obsoletePanels | kPanelCalibration;
 }
 
 QList<QGroupBox*> PreferencesDialog::getGroupBoxes()
@@ -5201,6 +5391,7 @@ void PreferencesDialog::useOdomFeatures()
 			_ui->surf_doubleSpinBox_maxDepth->setValue(_ui->loopClosure_bowMaxDepth->value());
 			_ui->surf_doubleSpinBox_minDepth->setValue(_ui->loopClosure_bowMinDepth->value());
 			_ui->surf_spinBox_wordsPerImageTarget->setValue(_ui->reextract_maxFeatures->value());
+			_ui->checkBox_kp_ssc->setChecked(_ui->checkBox_visSSC->isChecked());
 			_ui->spinBox_KPGridRows->setValue(_ui->reextract_gridrows->value());
 			_ui->spinBox_KPGridCols->setValue(_ui->reextract_gridcols->value());
 			_ui->lineEdit_kp_roi->setText(_ui->loopClosure_roi->text());
@@ -5426,13 +5617,13 @@ void PreferencesDialog::changePyDetectorPath()
 
 void PreferencesDialog::updateSourceGrpVisibility()
 {
+	_ui->stackedWidget_src->setVisible(_ui->comboBox_sourceType->currentIndex() != 4); // Not Camera None
+	_ui->frame_camera_sensor->setVisible(_ui->comboBox_sourceType->currentIndex() != 4); // Not Camera None
+
 	_ui->groupBox_sourceRGBD->setVisible(_ui->comboBox_sourceType->currentIndex() == 0);
 	_ui->groupBox_sourceStereo->setVisible(_ui->comboBox_sourceType->currentIndex() == 1);
 	_ui->groupBox_sourceRGB->setVisible(_ui->comboBox_sourceType->currentIndex() == 2);
 	_ui->groupBox_sourceDatabase->setVisible(_ui->comboBox_sourceType->currentIndex() == 3);
-
-	_ui->checkBox_source_scanFromDepth->setVisible(_ui->comboBox_sourceType->currentIndex() <= 1 || _ui->comboBox_sourceType->currentIndex() == 3);
-	_ui->label_source_scanFromDepth->setVisible(_ui->comboBox_sourceType->currentIndex() <= 1 || _ui->comboBox_sourceType->currentIndex() == 3);
 
 	_ui->stackedWidget_rgbd->setVisible(_ui->comboBox_sourceType->currentIndex() == 0 &&
 			(_ui->comboBox_cameraRGBD->currentIndex() == kSrcOpenNI2-kSrcRGBD ||
@@ -5442,7 +5633,8 @@ void PreferencesDialog::updateSourceGrpVisibility()
 			 _ui->comboBox_cameraRGBD->currentIndex() == kSrcRealSense - kSrcRGBD ||
 			 _ui->comboBox_cameraRGBD->currentIndex() == kSrcRGBDImages-kSrcRGBD ||
 			 _ui->comboBox_cameraRGBD->currentIndex() == kSrcOpenNI_PCL-kSrcRGBD ||
-			 _ui->comboBox_cameraRGBD->currentIndex() == kSrcRealSense2-kSrcRGBD));
+			 _ui->comboBox_cameraRGBD->currentIndex() == kSrcRealSense2-kSrcRGBD ||
+			 _ui->comboBox_cameraRGBD->currentIndex() == kSrcSeerSense-kSrcRGBD));
 	_ui->groupBox_openni2->setVisible(_ui->comboBox_sourceType->currentIndex() == 0 && _ui->comboBox_cameraRGBD->currentIndex() == kSrcOpenNI2-kSrcRGBD);
 	_ui->groupBox_freenect2->setVisible(_ui->comboBox_sourceType->currentIndex() == 0 && _ui->comboBox_cameraRGBD->currentIndex() == kSrcFreenect2-kSrcRGBD);
 	_ui->groupBox_k4w2->setVisible(_ui->comboBox_sourceType->currentIndex() == 0 && _ui->comboBox_cameraRGBD->currentIndex() == kSrcK4W2 - kSrcRGBD);
@@ -5486,6 +5678,30 @@ void PreferencesDialog::updateSourceGrpVisibility()
 				_ui->comboBox_sourceType->currentIndex() == 3);  // Database
 	_ui->groupBox_depthImageFiltering->setVisible(_ui->groupBox_depthImageFiltering->isEnabled());
 
+	_ui->groupBox_depthFromScan->setVisible(_ui->comboBox_sourceType->currentIndex() == 2 && _ui->source_comboBox_image_type->currentIndex() == kSrcImages-kSrcRGB);
+
+	// Odom Sensor Group
+	_ui->frame_visual_odometry_sensor->setVisible(getOdomSourceDriver() != kSrcUndef); // Not Lidar None
+	_ui->groupBox_odom_sensor->setVisible(_ui->comboBox_sourceType->currentIndex() != 3); // Don't show when database is selected
+
+	// Lidar Sensor Group
+	_ui->comboBox_lidar_src->setEnabled(_ui->comboBox_sourceType->currentIndex() != 3); // Disable if database input
+	if(!_ui->comboBox_lidar_src->isEnabled() && _ui->comboBox_lidar_src->currentIndex() != 0)
+	{
+		_ui->comboBox_lidar_src->setCurrentIndex(0); // Set to none
+	}
+	_ui->checkBox_source_scanFromDepth->setEnabled(_ui->comboBox_sourceType->currentIndex() <= 1 || _ui->comboBox_sourceType->currentIndex() == 3);
+	_ui->label_source_scanFromDepth->setEnabled(_ui->checkBox_source_scanFromDepth->isEnabled());
+	if(!_ui->checkBox_source_scanFromDepth->isEnabled())
+	{
+		_ui->checkBox_source_scanFromDepth->setChecked(false);
+	}
+	_ui->stackedWidget_lidar_src->setVisible(_ui->comboBox_lidar_src->currentIndex() > 0);
+	_ui->groupBox_vlp16->setVisible(_ui->comboBox_lidar_src->currentIndex()-1 == kSrcLidarVLP16-kSrcLidar);
+	_ui->frame_lidar_sensor->setVisible(_ui->comboBox_lidar_src->currentIndex() > 0 || _ui->checkBox_source_scanFromDepth->isChecked()); // Not Lidar None or database input
+	_ui->pushButton_test_lidar->setEnabled(_ui->comboBox_lidar_src->currentIndex() > 0);
+
+	// IMU group
 	_ui->groupBox_imuFiltering->setEnabled(
 			(_ui->comboBox_sourceType->currentIndex() == 0 && _ui->comboBox_cameraRGBD->currentIndex() == kSrcRGBDImages-kSrcRGBD) ||
 			(_ui->comboBox_sourceType->currentIndex() == 1 && _ui->comboBox_cameraStereo->currentIndex() == kSrcStereoImages-kSrcStereo) ||
@@ -5493,19 +5709,17 @@ void PreferencesDialog::updateSourceGrpVisibility()
 			(_ui->comboBox_sourceType->currentIndex() == 0 && _ui->comboBox_cameraRGBD->currentIndex() == kSrcFreenect - kSrcRGBD) || //Kinect360
 			(_ui->comboBox_sourceType->currentIndex() == 0 && _ui->comboBox_cameraRGBD->currentIndex() == kSrcK4A - kSrcRGBD) || //K4A
 			(_ui->comboBox_sourceType->currentIndex() == 0 && _ui->comboBox_cameraRGBD->currentIndex() == kSrcRealSense2 - kSrcRGBD) || //D435i
+			(_ui->comboBox_sourceType->currentIndex() == 0 && _ui->comboBox_cameraRGBD->currentIndex() == kSrcSeerSense - kSrcRGBD) ||
 			(_ui->comboBox_sourceType->currentIndex() == 1 && _ui->comboBox_cameraStereo->currentIndex() == kSrcStereoRealSense2 - kSrcStereo) || //T265
 			(_ui->comboBox_sourceType->currentIndex() == 1 && _ui->comboBox_cameraStereo->currentIndex() == kSrcStereoZed - kSrcStereo) || // ZEDm, ZED2
 			(_ui->comboBox_sourceType->currentIndex() == 1 && _ui->comboBox_cameraStereo->currentIndex() == kSrcStereoMyntEye - kSrcStereo) || // MYNT EYE S
 			(_ui->comboBox_sourceType->currentIndex() == 1 && _ui->comboBox_cameraStereo->currentIndex() == kSrcStereoZedOC - kSrcStereo) ||
 			(_ui->comboBox_sourceType->currentIndex() == 1 && _ui->comboBox_cameraStereo->currentIndex() == kSrcStereoDepthAI - kSrcStereo));
+	_ui->frame_imu_filtering->setVisible(getIMUFilteringStrategy() > 0); // Not None
 	_ui->stackedWidget_imuFilter->setVisible(_ui->comboBox_imuFilter_strategy->currentIndex() > 0);
 	_ui->groupBox_madgwickfilter->setVisible(_ui->comboBox_imuFilter_strategy->currentIndex() == 1);
 	_ui->groupBox_complementaryfilter->setVisible(_ui->comboBox_imuFilter_strategy->currentIndex() == 2);
 	_ui->groupBox_imuFiltering->setVisible(_ui->groupBox_imuFiltering->isEnabled());
-
-	//_ui->groupBox_scan->setVisible(_ui->comboBox_sourceType->currentIndex() != 3);
-
-	_ui->groupBox_depthFromScan->setVisible(_ui->comboBox_sourceType->currentIndex() == 2 && _ui->source_comboBox_image_type->currentIndex() == kSrcImages-kSrcRGB);
 }
 
 /*** GETTERS ***/
@@ -5899,6 +6113,10 @@ double PreferencesDialog::getSubtractFilteringAngle() const
 {
 	return _ui->doubleSpinBox_subtractFilteringAngle->value()*M_PI/180.0;
 }
+double PreferencesDialog::getGridUIResolution() const
+{
+	return _ui->doubleSpinBox_map_resolution->value();
+}
 bool PreferencesDialog::getGridMapShown() const
 {
 	return _ui->checkBox_map_shown->isChecked();
@@ -6031,11 +6249,25 @@ PreferencesDialog::Src PreferencesDialog::getOdomSourceDriver() const
 		//Zed SDK
 		return kSrcStereoZed;
 	}
+	else if(_ui->comboBox_odom_sensor->currentIndex() == 3)
+	{
+		//XVisio SDK
+		return kSrcSeerSense;
+	}
 	else if(_ui->comboBox_odom_sensor->currentIndex() != 0)
 	{
 		UERROR("Not implemented!");
 	}
 	return kSrcUndef;
+}
+
+PreferencesDialog::Src PreferencesDialog::getLidarSourceDriver() const
+{
+	if(_ui->comboBox_lidar_src->currentIndex() == 0)
+	{
+		return kSrcUndef;
+	}
+	return (PreferencesDialog::Src)(_ui->comboBox_lidar_src->currentIndex()-1 + kSrcLidar);
 }
 
 Transform PreferencesDialog::getSourceLocalTransform() const
@@ -6136,6 +6368,10 @@ bool PreferencesDialog::isSourceScanFromDepth() const
 {
 	return _ui->checkBox_source_scanFromDepth->isChecked();
 }
+bool PreferencesDialog::isSourceScanDeskewing() const
+{
+	return _ui->checkBox_source_scanDeskewing->isChecked();
+}
 int PreferencesDialog::getSourceScanDownsampleStep() const
 {
 	return _ui->spinBox_source_scanDownsampleStep->value();
@@ -6186,7 +6422,7 @@ Camera * PreferencesDialog::createCamera(
 		bool odomOnly,
 		bool odomSensorExtrinsicsCalib)
 {
-	if(odomOnly && !(driver == kSrcStereoRealSense2 || driver == kSrcStereoZed))
+	if(odomOnly && !(driver == kSrcStereoRealSense2 || driver == kSrcStereoZed || driver == kSrcSeerSense))
 	{
 		QMessageBox::warning(this, tr("Odometry Sensor"),
 				tr("Driver %1 cannot support odometry only mode.").arg(driver), QMessageBox::Ok);
@@ -6328,11 +6564,14 @@ Camera * PreferencesDialog::createCamera(
 				device.isEmpty()&&driver == kSrcStereoRealSense2?"T265":device.toStdString(),
 				this->getGeneralInputRate(),
 				this->getSourceLocalTransform());
-			((CameraRealSense2*)camera)->publishInterIMU(_ui->checkbox_publishInterIMU->isChecked());
+			camera->setInterIMUPublishing(
+					_ui->checkbox_publishInterIMU->isChecked(),
+					_ui->checkbox_publishInterIMU->isChecked() && getIMUFilteringStrategy()>0?
+							IMUFilter::create((IMUFilter::Type)(getIMUFilteringStrategy()-1), this->getAllParameters()):0);
 			if(driver == kSrcStereoRealSense2)
 			{
 				((CameraRealSense2*)camera)->setImagesRectified((_ui->checkBox_stereo_rectify->isEnabled() && _ui->checkBox_stereo_rectify->isChecked()) && !useRawImages);
-				((CameraRealSense2*)camera)->setOdomProvided(_ui->comboBox_odom_sensor->currentIndex() == 1 || odomOnly, odomOnly, odomSensorExtrinsicsCalib);
+				((CameraRealSense2*)camera)->setOdomProvided(getOdomSourceDriver() == kSrcStereoRealSense2 || odomOnly, odomOnly, odomSensorExtrinsicsCalib);
 			}
 			else
 			{
@@ -6341,7 +6580,7 @@ Camera * PreferencesDialog::createCamera(
 				((CameraRealSense2*)camera)->setResolution(_ui->spinBox_rs2_width->value(), _ui->spinBox_rs2_height->value(), _ui->spinBox_rs2_rate->value());
 				((CameraRealSense2*)camera)->setDepthResolution(_ui->spinBox_rs2_width_depth->value(), _ui->spinBox_rs2_height_depth->value(), _ui->spinBox_rs2_rate_depth->value());
 				((CameraRealSense2*)camera)->setGlobalTimeSync(_ui->checkbox_rs2_globalTimeStync->isChecked());
-				((CameraRealSense2*)camera)->setDualMode(_ui->comboBox_odom_sensor->currentIndex()==1, Transform::fromString(_ui->lineEdit_odom_sensor_extrinsics->text().toStdString()));
+				((CameraRealSense2*)camera)->setDualMode(getOdomSourceDriver() == kSrcStereoRealSense2, Transform::fromString(_ui->lineEdit_odom_sensor_extrinsics->text().toStdString()));
 				((CameraRealSense2*)camera)->setJsonConfig(_ui->lineEdit_rs2_jsonFile->text().toStdString());
 			}
 		}
@@ -6514,7 +6753,7 @@ Camera * PreferencesDialog::createCamera(
 				_ui->comboBox_stereoZed_quality->currentIndex(),
 				_ui->comboBox_stereoZed_sensingMode->currentIndex(),
 				_ui->spinBox_stereoZed_confidenceThr->value(),
-				_ui->comboBox_odom_sensor->currentIndex() == 2,
+				getOdomSourceDriver() == kSrcStereoZed,
 				this->getGeneralInputRate(),
 				this->getSourceLocalTransform(),
 				_ui->checkbox_stereoZed_selfCalibration->isChecked(),
@@ -6530,14 +6769,17 @@ Camera * PreferencesDialog::createCamera(
 				_ui->comboBox_stereoZed_quality->currentIndex()==0&&odomOnly?1:_ui->comboBox_stereoZed_quality->currentIndex(),
 				_ui->comboBox_stereoZed_sensingMode->currentIndex(),
 				_ui->spinBox_stereoZed_confidenceThr->value(),
-				_ui->comboBox_odom_sensor->currentIndex() == 2 || odomOnly,
+				getOdomSourceDriver() == kSrcStereoZed || odomOnly,
 				this->getGeneralInputRate(),
 				this->getSourceLocalTransform(),
 				_ui->checkbox_stereoZed_selfCalibration->isChecked(),
 				_ui->loopClosure_bowForce2D->isChecked(),
 				_ui->spinBox_stereoZed_texturenessConfidenceThr->value());
 		}
-		((CameraStereoZed*)camera)->publishInterIMU(_ui->checkbox_publishInterIMU->isChecked());
+		camera->setInterIMUPublishing(
+				_ui->checkbox_publishInterIMU->isChecked(),
+				_ui->checkbox_publishInterIMU->isChecked() && getIMUFilteringStrategy()>0?
+						IMUFilter::create((IMUFilter::Type)(getIMUFilteringStrategy()-1), this->getAllParameters()):0);
 	}
 	else if (driver == kSrcStereoZedOC)
 	{
@@ -6561,7 +6803,7 @@ Camera * PreferencesDialog::createCamera(
 		((CameraDepthAI*)camera)->setExtendedDisparity(_ui->checkBox_depthai_extended_disparity->isChecked());
 		((CameraDepthAI*)camera)->setSubpixelMode(_ui->comboBox_depthai_subpixel_fractional_bits->currentIndex()!=0, _ui->comboBox_depthai_subpixel_fractional_bits->currentIndex()==2?4:_ui->comboBox_depthai_subpixel_fractional_bits->currentIndex()==3?5:3);
 		((CameraDepthAI*)camera)->setCompanding(_ui->comboBox_depthai_disparity_companding->currentIndex()!=0, _ui->comboBox_depthai_disparity_companding->currentIndex()==1?64:96);
-		((CameraDepthAI*)camera)->setRectification(_ui->checkBox_depthai_use_spec_translation->isChecked(), _ui->doubleSpinBox_depthai_alpha_scaling->value());
+		((CameraDepthAI*)camera)->setRectification(_ui->checkBox_depthai_use_spec_translation->isChecked(), _ui->doubleSpinBox_depthai_alpha_scaling->value(), !useRawImages);
 		((CameraDepthAI*)camera)->setIMU(_ui->checkBox_depthai_imu_published->isChecked(), _ui->checkbox_publishInterIMU->isChecked());
 		((CameraDepthAI*)camera)->setIrIntensity(_ui->doubleSpinBox_depthai_dot_intensity->value(), _ui->doubleSpinBox_depthai_flood_intensity->value());
 		((CameraDepthAI*)camera)->setDetectFeatures(_ui->comboBox_depthai_detect_features->currentIndex());
@@ -6574,6 +6816,18 @@ Camera * PreferencesDialog::createCamera(
 		{
 			((CameraDepthAI*)camera)->setSuperPointDetector(_ui->doubleSpinBox_sptorch_threshold->value(), _ui->checkBox_sptorch_nms->isChecked(), _ui->spinBox_sptorch_minDistance->value());
 		}
+	}
+	else if (driver == kSrcSeerSense)
+	{
+		UDEBUG("SeerSense");
+		camera = new CameraSeerSense(
+			getOdomSourceDriver() == kSrcSeerSense || odomOnly,
+			this->getGeneralInputRate(),
+			this->getSourceLocalTransform());
+		camera->setInterIMUPublishing(
+			_ui->checkbox_publishInterIMU->isChecked(),
+			_ui->checkbox_publishInterIMU->isChecked() && getIMUFilteringStrategy()>0?
+					IMUFilter::create((IMUFilter::Type)(getIMUFilteringStrategy()-1), this->getAllParameters()):0);
 	}
 	else if(driver == kSrcUsbDevice)
 	{
@@ -6703,7 +6957,7 @@ Camera * PreferencesDialog::createCamera(
 	return camera;
 }
 
-Camera * PreferencesDialog::createOdomSensor(Transform & extrinsics, double & timeOffset, float & scaleFactor)
+SensorCapture * PreferencesDialog::createOdomSensor(Transform & extrinsics, double & timeOffset, float & scaleFactor, double & waitTime)
 {
 	Src driver = getOdomSourceDriver();
 	if(driver != kSrcUndef)
@@ -6722,10 +6976,72 @@ Camera * PreferencesDialog::createOdomSensor(Transform & extrinsics, double & ti
 		extrinsics = Transform::fromString(_ui->lineEdit_odom_sensor_extrinsics->text().replace("PI_2", QString::number(3.141592/2.0)).toStdString());
 		timeOffset = _ui->doubleSpinBox_odom_sensor_time_offset->value()/1000.0;
 		scaleFactor = (float)_ui->doubleSpinBox_odom_sensor_scale_factor->value();
+		waitTime = _ui->doubleSpinBox_odom_sensor_wait_time->value()/1000.0;
 
 		return createCamera(driver, _ui->lineEdit_odomSourceDevice->text(), _ui->lineEdit_odom_sensor_path_calibration->text(), false, true, true, false);
 	}
 	return 0;
+}
+
+Lidar * PreferencesDialog::createLidar()
+{
+	Lidar * lidar = 0;
+	Src driver = getLidarSourceDriver();
+	if(driver == kSrcLidarVLP16)
+	{
+#if PCL_VERSION_COMPARE(>=, 1, 8, 0)
+		Transform localTransform = Transform::fromString(_ui->lineEdit_lidar_local_transform->text().replace("PI_2", QString::number(3.141592/2.0)).toStdString());
+		if(localTransform.isNull())
+		{
+			UWARN("Failed to parse lidar local transfor string \"%s\"!",
+					_ui->lineEdit_lidar_local_transform->text().toStdString().c_str());
+			localTransform = Transform::getIdentity();
+		}
+		if(!_ui->lineEdit_vlp16_pcap_path->text().isEmpty())
+		{
+			// PCAP mode
+			lidar = new LidarVLP16(
+					_ui->lineEdit_vlp16_pcap_path->text().toStdString(),
+					_ui->checkBox_vlp16_organized->isChecked(),
+					_ui->checkBox_vlp16_stamp_last->isChecked(),
+					this->getGeneralInputRate(),
+					localTransform);
+		}
+		else
+		{
+			// Connect to sensor
+
+			lidar = new LidarVLP16(
+					boost::asio::ip::address_v4::from_string(uFormat("%ld.%ld.%ld.%ld",
+							(size_t)_ui->spinBox_vlp16_ip1->value(),
+							(size_t)_ui->spinBox_vlp16_ip2->value(),
+							(size_t)_ui->spinBox_vlp16_ip3->value(),
+							(size_t)_ui->spinBox_vlp16_ip4->value())),
+					_ui->spinBox_vlp16_port->value(),
+					_ui->checkBox_vlp16_organized->isChecked(),
+					_ui->checkBox_vlp16_hostTime->isChecked(),
+					_ui->checkBox_vlp16_stamp_last->isChecked(),
+					this->getGeneralInputRate(),
+					localTransform);
+
+		}
+		if(!lidar->init())
+		{
+			UWARN("init lidar failed... ");
+			QMessageBox::warning(this,
+					   tr("RTAB-Map"),
+					   tr("Lidar initialization failed..."));
+			delete lidar;
+			lidar = 0;
+		}
+#else
+		UWARN("Lidar cannot be used with rtabmap built with PCL < 1.8... ");
+		QMessageBox::warning(this,
+				   tr("RTAB-Map"),
+				   tr("Lidar initialization failed..."));
+#endif
+	}
+	return lidar;
 }
 
 bool PreferencesDialog::isStatisticsPublished() const
@@ -6925,7 +7241,7 @@ void PreferencesDialog::testOdometry()
 	odomViewer->resize(1280, 480+QPushButton().minimumHeight());
 	odomViewer->registerToEventsManager();
 
-	CameraThread cameraThread(camera, this->getAllParameters()); // take ownership of camera
+	SensorCaptureThread cameraThread(camera, this->getAllParameters()); // take ownership of camera
 	cameraThread.setMirroringEnabled(isSourceMirroring());
 	cameraThread.setColorOnly(_ui->checkbox_rgbd_colorOnly->isChecked());
 	cameraThread.setImageDecimation(_ui->spinBox_source_imageDecimation->value());
@@ -6944,7 +7260,8 @@ void PreferencesDialog::testOdometry()
 			_ui->doubleSpinBox_source_scanVoxelSize->value(),
 			_ui->spinBox_source_scanNormalsK->value(),
 			_ui->doubleSpinBox_source_scanNormalsRadius->value(),
-			(float)_ui->doubleSpinBox_source_scanNormalsForceGroundUp->value());
+			(float)_ui->doubleSpinBox_source_scanNormalsForceGroundUp->value(),
+			_ui->checkBox_source_scanDeskewing->isChecked());
 	if(_ui->comboBox_imuFilter_strategy->currentIndex()>0 && dynamic_cast<DBReader*>(camera) == 0)
 	{
 		cameraThread.enableIMUFiltering(_ui->comboBox_imuFilter_strategy->currentIndex()-1, this->getAllParameters(), _ui->checkBox_imuFilter_baseFrameConversion->isChecked());
@@ -6963,7 +7280,7 @@ void PreferencesDialog::testOdometry()
 		}
 	}
 
-	UEventsManager::createPipe(&cameraThread, &odomThread, "CameraEvent");
+	UEventsManager::createPipe(&cameraThread, &odomThread, "SensorEvent");
 	if(imuThread)
 	{
 		UEventsManager::createPipe(imuThread, &odomThread, "IMUEvent");
@@ -7001,7 +7318,7 @@ void PreferencesDialog::testCamera()
 	Camera * camera = this->createCamera();
 	if(camera)
 	{
-		CameraThread cameraThread(camera, this->getAllParameters());
+		SensorCaptureThread cameraThread(camera, this->getAllParameters());
 		cameraThread.setMirroringEnabled(isSourceMirroring());
 		cameraThread.setColorOnly(_ui->checkbox_rgbd_colorOnly->isChecked());
 		cameraThread.setImageDecimation(_ui->spinBox_source_imageDecimation->value());
@@ -7020,7 +7337,8 @@ void PreferencesDialog::testCamera()
 				_ui->doubleSpinBox_source_scanVoxelSize->value(),
 				_ui->spinBox_source_scanNormalsK->value(),
 				_ui->doubleSpinBox_source_scanNormalsRadius->value(),
-				(float)_ui->doubleSpinBox_source_scanNormalsForceGroundUp->value());
+				(float)_ui->doubleSpinBox_source_scanNormalsForceGroundUp->value(),
+				_ui->checkBox_source_scanDeskewing->isChecked());
 		if(_ui->comboBox_imuFilter_strategy->currentIndex()>0 && dynamic_cast<DBReader*>(camera) == 0)
 		{
 			cameraThread.enableIMUFiltering(_ui->comboBox_imuFilter_strategy->currentIndex()-1, this->getAllParameters(), _ui->checkBox_imuFilter_baseFrameConversion->isChecked());
@@ -7038,7 +7356,7 @@ void PreferencesDialog::testCamera()
 				cameraThread.setDistortionModel(_ui->lineEdit_source_distortionModel->text().toStdString());
 			}
 		}
-		UEventsManager::createPipe(&cameraThread, window, "CameraEvent");
+		UEventsManager::createPipe(&cameraThread, window, "SensorEvent");
 
 		cameraThread.start();
 		window->exec();
@@ -7102,8 +7420,8 @@ void PreferencesDialog::calibrate()
 				_calibrationDialog->setStereoMode(false); // this forces restart
 				_calibrationDialog->setCameraName(QString(camera->getSerial().c_str())+"_rgb");
 				_calibrationDialog->registerToEventsManager();
-				CameraThread cameraThread(camera, this->getAllParameters());
-				UEventsManager::createPipe(&cameraThread, _calibrationDialog, "CameraEvent");
+				SensorCaptureThread cameraThread(camera, this->getAllParameters());
+				UEventsManager::createPipe(&cameraThread, _calibrationDialog, "SensorEvent");
 				cameraThread.start();
 				_calibrationDialog->exec();
 				_calibrationDialog->unregisterFromEventsManager();
@@ -7130,8 +7448,8 @@ void PreferencesDialog::calibrate()
 					_calibrationDialog->setStereoMode(false); // this forces restart
 					_calibrationDialog->setCameraName(QString(camera->getSerial().c_str())+"_depth");
 					_calibrationDialog->registerToEventsManager();
-					CameraThread cameraThread(camera, this->getAllParameters());
-					UEventsManager::createPipe(&cameraThread, _calibrationDialog, "CameraEvent");
+					SensorCaptureThread cameraThread(camera, this->getAllParameters());
+					UEventsManager::createPipe(&cameraThread, _calibrationDialog, "SensorEvent");
 					cameraThread.start();
 					_calibrationDialog->exec();
 					_calibrationDialog->unregisterFromEventsManager();
@@ -7174,7 +7492,7 @@ void PreferencesDialog::calibrate()
 						{
 							return;
 						}
-						SensorData rgbData = camera->takeImage();
+						SensorData rgbData = camera->takeData();
 						UASSERT(rgbData.cameraModels().size() == 1);
 						rgbModel = rgbData.cameraModels()[0];
 						delete camera;
@@ -7183,7 +7501,7 @@ void PreferencesDialog::calibrate()
 						{
 							return;
 						}
-						SensorData irData = camera->takeImage();
+						SensorData irData = camera->takeData();
 						serial = camera->getSerial();
 						UASSERT(irData.cameraModels().size() == 1);
 						irModel = irData.cameraModels()[0];
@@ -7251,16 +7569,19 @@ void PreferencesDialog::calibrate()
 		}
 
 		bool freenect2 = driver == kSrcFreenect2;
-		bool fisheye = driver == kSrcStereoRealSense2;
-		_calibrationDialog->setStereoMode(this->getSourceType() != kSrcRGB && driver != kSrcRealSense, freenect2?"rgb":"left", freenect2?"depth":"right"); // RGB+Depth or left+right
+		bool rgbDepth = freenect2 || (driver==kSrcStereoDepthAI && _ui->comboBox_depthai_output_mode->currentIndex() == 2);
+		_calibrationDialog->setStereoMode(this->getSourceType() != kSrcRGB && driver != kSrcRealSense, rgbDepth?"rgb":"left", rgbDepth?"depth":"right"); // RGB+Depth or left+right
 		_calibrationDialog->setCameraName("");
 		_calibrationDialog->setSwitchedImages(freenect2);
-		_calibrationDialog->setFisheyeImages(fisheye);
+		if(driver == kSrcStereoRealSense2)
+			_calibrationDialog->setFisheyeModel();
+		if(driver == kSrcStereoDepthAI)
+			_calibrationDialog->setRationalModel();
 		_calibrationDialog->setSavingDirectory(this->getCameraInfoDir());
 		_calibrationDialog->registerToEventsManager();
 
-		CameraThread cameraThread(camera, this->getAllParameters());
-		UEventsManager::createPipe(&cameraThread, _calibrationDialog, "CameraEvent");
+		SensorCaptureThread cameraThread(camera, this->getAllParameters());
+		UEventsManager::createPipe(&cameraThread, _calibrationDialog, "SensorEvent");
 
 		cameraThread.start();
 
@@ -7269,6 +7590,7 @@ void PreferencesDialog::calibrate()
 
 		cameraThread.join(true);
 	}
+	makeObsoleteCalibrationPanel();
 }
 
 void PreferencesDialog::calibrateSimple()
@@ -7303,25 +7625,12 @@ void PreferencesDialog::calibrateOdomSensorExtrinsics()
 		}
 	}
 
-	Src odomDriver;
-	if(_ui->comboBox_odom_sensor->currentIndex() == 0)
+	Src odomDriver = getOdomSourceDriver();
+	if(odomDriver == kSrcUndef)
 	{
 		QMessageBox::warning(this,
 				   tr("Calibration"),
 				   tr("No odometry sensor selected!"));
-		return;
-	}
-	else if(_ui->comboBox_odom_sensor->currentIndex() == 1)
-	{
-		odomDriver = kSrcStereoRealSense2;
-	}
-	else if(_ui->comboBox_odom_sensor->currentIndex() == 2)
-	{
-		odomDriver = kSrcStereoZed;
-	}
-	else
-	{
-		UERROR("Odom sensor %d not implemented", _ui->comboBox_odom_sensor->currentIndex());
 		return;
 	}
 
@@ -7419,7 +7728,7 @@ void PreferencesDialog::calibrateOdomSensorExtrinsics()
 					delete camera;
 					return;
 				}
-				SensorData odomSensorData = camera->takeImage();
+				SensorData odomSensorData = camera->takeData();
 				if(odomSensorData.cameraModels().size() == 1) {
 					odomSensorModel = odomSensorData.cameraModels()[0];
 				}
@@ -7443,7 +7752,7 @@ void PreferencesDialog::calibrateOdomSensorExtrinsics()
 					delete camera;
 					return;
 				}
-				SensorData camData = camera->takeImage();
+				SensorData camData = camera->takeData();
 				serial = camera->getSerial();
 				if(camData.cameraModels().size() == 1) {
 					cameraModel = camData.cameraModels()[0];
@@ -7517,6 +7826,43 @@ void PreferencesDialog::calibrateOdomSensorExtrinsics()
 				}
 			}
 		}
+	}
+}
+
+void PreferencesDialog::testLidar()
+{
+	CameraViewer * window = new CameraViewer(this, this->getAllParameters());
+	window->setWindowTitle(tr("Lidar viewer"));
+	window->setWindowFlags(Qt::Window);
+	window->resize(1280, 480+QPushButton().minimumHeight());
+	window->registerToEventsManager();
+	window->setDecimation(1);
+
+	Lidar * lidar = this->createLidar();
+	if(lidar)
+	{
+		SensorCaptureThread lidarThread(lidar, this->getAllParameters());
+		lidarThread.setScanParameters(
+				_ui->checkBox_source_scanFromDepth->isChecked(),
+				_ui->spinBox_source_scanDownsampleStep->value(),
+				_ui->doubleSpinBox_source_scanRangeMin->value(),
+				_ui->doubleSpinBox_source_scanRangeMax->value(),
+				_ui->doubleSpinBox_source_scanVoxelSize->value(),
+				_ui->spinBox_source_scanNormalsK->value(),
+				_ui->doubleSpinBox_source_scanNormalsRadius->value(),
+				(float)_ui->doubleSpinBox_source_scanNormalsForceGroundUp->value(),
+				_ui->checkBox_source_scanDeskewing->isChecked());
+
+		UEventsManager::createPipe(&lidarThread, window, "SensorEvent");
+
+		lidarThread.start();
+		window->exec();
+		delete window;
+		lidarThread.join(true);
+	}
+	else
+	{
+		delete window;
 	}
 }
 

@@ -197,6 +197,7 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(Rtabmap, LoopThr,           float, 0.11,      "Loop closing threshold.");
     RTABMAP_PARAM(Rtabmap, LoopRatio,         float, 0,         "The loop closure hypothesis must be over LoopRatio x lastHypothesisValue.");
     RTABMAP_PARAM(Rtabmap, LoopGPS,           bool,  true,      uFormat("Use GPS to filter likelihood (if GPS is recorded). Only locations inside the local radius \"%s\" of the current GPS location are considered for loop closure detection.", kRGBDLocalRadius().c_str()));
+    RTABMAP_PARAM(Rtabmap, VirtualPlaceLikelihoodRatio, int, 0,  "Likelihood ratio for virtual place (for no loop closure hypothesis): 0=Mean / StdDev, 1=StdDev / (Max-Mean)");
 
     // Memory
     RTABMAP_PARAM(Mem, RehearsalSimilarity,         float, 0.6,     "Rehearsal similarity.");
@@ -243,6 +244,7 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(Kp, MaxDepth,                 float, 0,     "Filter extracted keypoints by depth (0=inf).");
     RTABMAP_PARAM(Kp, MinDepth,                 float, 0,     "Filter extracted keypoints by depth.");
     RTABMAP_PARAM(Kp, MaxFeatures,              int, 500,     "Maximum features extracted from the images (0 means not bounded, <0 means no extraction).");
+    RTABMAP_PARAM(Kp, SSC,                      bool, false,  "If true, SSC (Suppression via Square Covering) is applied to limit keypoints.");
     RTABMAP_PARAM(Kp, BadSignRatio,             float, 0.5,   "Bad signature ratio (less than Ratio x AverageWordsPerImage = bad).");
     RTABMAP_PARAM(Kp, NndrRatio,                float, 0.8,   "NNDR ratio (A matching pair is detected, if its distance is closer than X times the distance of the second nearest neighbor.)");
 #if CV_MAJOR_VERSION > 2 && !defined(HAVE_OPENCV_XFEATURES2D)
@@ -355,6 +357,7 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(RGBD, AngularUpdate,            float, 0.1,  "Minimum angular displacement (rad) to update the map. Rehearsal is done prior to this, so weights are still updated.");
     RTABMAP_PARAM(RGBD, LinearSpeedUpdate,        float, 0.0,  "Maximum linear speed (m/s) to update the map (0 means not limit).");
     RTABMAP_PARAM(RGBD, AngularSpeedUpdate,       float, 0.0,  "Maximum angular speed (rad/s) to update the map (0 means not limit).");
+    RTABMAP_PARAM(RGBD, AggressiveLoopThr,        float, 0.05, uFormat("Loop closure threshold used (overriding %s) when a new mapping session is not yet linked to a map of the highest loop closure hypothesis. In localization mode, this threshold is used when there are no loop closure constraints with any map in the cache (%s). In all cases, the goal is to aggressively loop on a previous map in the database. Only used when %s is enabled. Set 1 to disable.", kRtabmapLoopThr().c_str(), kRGBDMaxOdomCacheSize().c_str(), kRGBDEnabled().c_str()));
     RTABMAP_PARAM(RGBD, NewMapOdomChangeDistance, float, 0,    "A new map is created if a change of odometry translation greater than X m is detected (0 m = disabled).");
     RTABMAP_PARAM(RGBD, OptimizeFromGraphEnd,     bool, false, "Optimize graph from the newest node. If false, the graph is optimized from the oldest node of the current graph (this adds an overhead computation to detect to oldest node of the current graph, but it can be useful to preserve the map referential from the oldest node). Warning when set to false: when some nodes are transferred, the first referential of the local map may change, resulting in momentary changes in robot/map position (which are annoying in teleoperation).");
     RTABMAP_PARAM(RGBD, OptimizeMaxError,         float, 3.0,   uFormat("Reject loop closures if optimization error ratio is greater than this value (0=disabled). Ratio is computed as absolute error over standard deviation of each link. This will help to detect when a wrong loop closure is added to the graph. Not compatible with \"%s\" if enabled.", kOptimizerRobust().c_str()));
@@ -463,6 +466,7 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(Odom, ScanKeyFrameThr,        float, 0.9,   "[Geometry] Create a new keyframe when the number of ICP inliers drops under this ratio of points in last frame's scan. Setting the value to 0 means that a keyframe is created for each processed frame.");
     RTABMAP_PARAM(Odom, ImageDecimation,     unsigned int, 1, uFormat("Decimation of the RGB image before registration. If depth size is larger than decimated RGB size, depth is decimated to be always at most equal to RGB size. If %s is true and if depth is smaller than decimated RGB, depth may be interpolated to match RGB size for feature detection.", kVisDepthAsMask().c_str()));
     RTABMAP_PARAM(Odom, AlignWithGround,        bool, false,  "Align odometry with the ground on initialization.");
+    RTABMAP_PARAM(Odom, Deskewing,              bool, true,   "Lidar deskewing. If input lidar has time channel, it will be deskewed with a constant motion model (with IMU orientation and/or guess if provided).");
 
     // Odometry Frame-to-Map
     RTABMAP_PARAM(OdomF2M, MaxSize,             int, 2000,    "[Visual] Local map size: If > 0 (example 5000), the odometry will maintain a local map of X maximum words.");
@@ -691,6 +695,7 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(Vis, FeatureType, int, 6, "0=SURF 1=SIFT 2=ORB 3=FAST/FREAK 4=FAST/BRIEF 5=GFTT/FREAK 6=GFTT/BRIEF 7=BRISK 8=GFTT/ORB 9=KAZE 10=ORB-OCTREE 11=SuperPoint 12=SURF/FREAK 13=GFTT/DAISY 14=SURF/DAISY 15=PyDetector");
 #endif
     RTABMAP_PARAM(Vis, MaxFeatures,               int,   1000,  "0 no limits.");
+    RTABMAP_PARAM(Vis, SSC,                       bool,  false, "If true, SSC (Suppression via Square Covering) is applied to limit keypoints.");
     RTABMAP_PARAM(Vis, MaxDepth,                  float, 0,     "Max depth of the features (0 means no limit).");
     RTABMAP_PARAM(Vis, MinDepth,                  float, 0,     "Min depth of the features (0 means no limit).");
     RTABMAP_PARAM(Vis, DepthAsMask,               bool,  true,  "Use depth image as mask when extracting features.");
@@ -752,6 +757,7 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(Icp, Epsilon,                   float, 0,     "Set the transformation epsilon (maximum allowable difference between two consecutive transformations) in order for an optimization to be considered as having converged to the final solution.");
     RTABMAP_PARAM(Icp, CorrespondenceRatio,       float, 0.1,   "Ratio of matching correspondences to accept the transform.");
     RTABMAP_PARAM(Icp, Force4DoF,                 bool, false,   uFormat("Limit ICP to x, y, z and yaw DoF. Available if %s > 0.", kIcpStrategy().c_str()));
+    RTABMAP_PARAM(Icp, FiltersEnabled,            int, 3,       "Flag to enable filters: 1=\"from\" cloud only, 2=\"to\" cloud only, 3=both.");
 #ifdef RTABMAP_POINTMATCHER
     RTABMAP_PARAM(Icp, PointToPlane,                bool, true,   "Use point to plane ICP.");
 #else
@@ -931,6 +937,7 @@ public:
     static ParametersMap filterParameters(const ParametersMap & parameters, const std::string & group, bool remove = false);
 
     static void readINI(const std::string & configFile, ParametersMap & parameters, bool modifiedOnly = false);
+    static void readINIStr(const std::string & configContent, ParametersMap & parameters, bool modifiedOnly = false);
     static void writeINI(const std::string & configFile, const ParametersMap & parameters);
 
     /**
