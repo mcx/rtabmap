@@ -63,10 +63,6 @@ ELSE()
     option(FLANN_KDTREE_MEM_OPT  "Disable multi-threaded FLANN kd-tree to minimize memory allocations"   ON)
 ENDIF()
 
-IF(FLANN_KDTREE_MEM_OPT)
-    ADD_DEFINITIONS("-DFLANN_KDTREE_MEM_OPT")
-ENDIF(FLANN_KDTREE_MEM_OPT)
-
 IF(WIN32 AND NOT MINGW)
     ADD_DEFINITIONS("-DNOMINMAX")
     ADD_DEFINITIONS("-wd4100 -wd4127 -wd4150 -wd4191 -wd4242 -wd4244 -wd4251 -wd4305 -wd4365 -wd4512 -wd4514 -wd4548 -wd4571 -wd4619 -wd4625 -wd4626 -wd4628 -wd4668 -wd4710 -wd4711 -wd4738 -wd4820 -wd4946 -wd4986")
@@ -181,6 +177,13 @@ OPTION(BUILD_DOCUMENTATION "Prepare the API documentation build (downloads the D
 if(ANDROID OR IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
    set(BUILD_TESTING OFF CACHE BOOL "Build the testing tree." FORCE)
 endif()
+
+# Performance tests are benchmarks: they report times, memory and recall
+# instead of asserting on them, as those depend on the machine. They are built
+# by default so they cannot rot, but are labelled "performance" so that a run
+# opts in with `ctest -L performance` and CI opts out with `ctest -LE
+# performance`. They can also be run directly, e.g. bin/test_flann_index_perf.
+OPTION(BUILD_PERF_TESTS "Build the performance tests (see ctest -L performance)" ON)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -1565,6 +1568,7 @@ MESSAGE(STATUS "  BUILD_APP =            ${BUILD_APP}")
 MESSAGE(STATUS "  BUILD_TOOLS =          ${BUILD_TOOLS}")
 MESSAGE(STATUS "  BUILD_EXAMPLES =       ${BUILD_EXAMPLES}")
 MESSAGE(STATUS "  BUILD_TESTING =        ${BUILD_TESTING}")
+MESSAGE(STATUS "  BUILD_PERF_TESTS =     ${BUILD_PERF_TESTS}")
 MESSAGE(STATUS "  ENABLE_COVERAGE =      ${ENABLE_COVERAGE}")
 MESSAGE(STATUS "  ENABLE_FORMAT_ERRORS = ${ENABLE_FORMAT_ERRORS}")
 IF(NOT WIN32)

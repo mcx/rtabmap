@@ -68,6 +68,11 @@ public:
 	/**
 	 * @enum NNStrategy
 	 * @brief Nearest neighbor search strategies for descriptor matching
+	 *
+	 * The values are those of the Kp/NNStrategy parameter, saved in user
+	 * configurations and databases: append, never renumber. The Vis/CorNNType
+	 * parameter has strategies of its own, its values are mapped to these ones
+	 * by RegistrationVis::nnStrategyFromCorNNType().
 	 */
 	enum NNStrategy{
 		kNNFlannNaive,      ///< FLANN naive search (exhaustive)
@@ -75,6 +80,8 @@ public:
 		kNNFlannLSH,        ///< FLANN Locality-Sensitive Hashing (ideal for binary descriptors)
 		kNNBruteForce,      ///< Brute force CPU search
 		kNNBruteForceGPU,   ///< Brute force GPU-accelerated search (requires CUDA)
+		kNNFlannKdTreeSingle, ///< FLANN single exact kd-tree index (rebuilt whenever a word is added, for an index built once)
+		kNNNanoFlannKdTree,   ///< nanoflann kd-tree index (float descriptors only, incremental)
 		kNNUndef            ///< Undefined strategy
 	};
 	
@@ -106,10 +113,16 @@ public:
 			return "BRUTE FORCE";
 		case kNNBruteForceGPU:
 			return "BRUTE FORCE GPU";
+		case kNNNanoFlannKdTree:
+			return "NANOFLANN KD-TREE";
+		case kNNFlannKdTreeSingle:
+			return "FLANN KD-TREE SINGLE";
 		default:
 			return "Unknown";
 		}
 	}
+
+
 
 public:
 	/**

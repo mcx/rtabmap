@@ -38,6 +38,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/VisualWord.h>
 #include <rtabmap/core/Optimizer.h>
 #include <rtabmap/core/util3d_transforms.h>
+#include <rtabmap/core/FlannIndex.h>
 #include <rtabmap/utilite/ULogger.h>
 #include <rtabmap/utilite/UConversion.h>
 #include <rtabmap/utilite/UStl.h>
@@ -56,7 +57,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <opencv2/cudaimgproc.hpp>
 #endif
 
-#include <rtflann/flann.hpp>
 
 
 #ifdef RTABMAP_PYTHON
@@ -64,6 +64,52 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 namespace rtabmap {
+
+// The dictionary strategy a Vis/CorNNType value stands for. Vis/CorNNType
+// shares the values of Kp/NNStrategy for the strategies the dictionary
+// implements, and extends them with matching approaches of its own, hence the
+// mapping. Return VWDictionary::kNNUndef for the values RegistrationVis handles
+// itself (BruteForceCrossCheck, SuperGlue, GMS).
+static VWDictionary::NNStrategy nnStrategyFromCorNNType(int nnType)
+{
+	// 0 to 4 are the dictionary strategies themselves, 5, 6 and 7 are the
+	// approaches RegistrationVis implements (BruteForceCrossCheck, SuperGlue
+	// and GMS), and the ones after them are dictionary strategies again, at an
+	// offset of the three above.
+	if(nnType >= 0 && nnType <= VWDictionary::kNNBruteForceGPU)
+	{
+		return (VWDictionary::NNStrategy)nnType;
+	}
+	if(nnType > 7)
+	{
+		const int strategy = nnType - 3;
+		if(strategy < VWDictionary::kNNUndef)
+		{
+			return (VWDictionary::NNStrategy)strategy;
+		}
+	}
+	return VWDictionary::kNNUndef;
+}
+
+std::string RegistrationVis::getNNTypeName(int nnType)
+{
+	const VWDictionary::NNStrategy strategy = nnStrategyFromCorNNType(nnType);
+	if(strategy != VWDictionary::kNNUndef)
+	{
+		return VWDictionary::nnStrategyName(strategy);
+	}
+	switch(nnType)
+	{
+	case 5:
+		return "BRUTE FORCE CROSS CHECK";
+	case 6:
+		return "PY MATCHER";
+	case 7:
+		return "GMS";
+	default:
+		return "Unknown";
+	}
+}
 
 RegistrationVis::RegistrationVis(const ParametersMap & parameters, Registration * child) :
 		Registration(parameters, child),
@@ -123,6 +169,12 @@ RegistrationVis::RegistrationVis(const ParametersMap & parameters, Registration 
 	uInsert(_featureParameters, ParametersPair(Parameters::kKpGridRows(), _featureParameters.at(Parameters::kVisGridRows())));
 	uInsert(_featureParameters, ParametersPair(Parameters::kKpGridCols(), _featureParameters.at(Parameters::kVisGridCols())));
 	uInsert(_featureParameters, ParametersPair(Parameters::kKpNewWordsComparedTogether(), "false"));
+	// The dictionary used to match descriptors (see computeTransformationImpl())
+	// is built once and searched once, then thrown away: the words added while
+	// searching it are never indexed. Nothing is gained by keeping its index
+	// ready to be added to, and the bookkeeping that needs costs a descriptor
+	// reference per feature on every registration.
+	uInsert(_featureParameters, ParametersPair(Parameters::kKpIncrementalFlann(), "false"));
 
 	this->parseParameters(parameters);
 }
@@ -237,9 +289,10 @@ void RegistrationVis::parseParameters(const ParametersMap & parameters)
 
 	if(uContains(parameters, Parameters::kVisCorNNType()))
 	{
-		if(_nnType<VWDictionary::kNNUndef)
+		const VWDictionary::NNStrategy strategy = nnStrategyFromCorNNType(_nnType);
+		if(strategy != VWDictionary::kNNUndef)
 		{
-			uInsert(_featureParameters, ParametersPair(Parameters::kKpNNStrategy(), uNumber2Str(_nnType)));
+			uInsert(_featureParameters, ParametersPair(Parameters::kKpNNStrategy(), uNumber2Str((int)strategy)));
 		}
 	}
 	if(uContains(parameters, Parameters::kVisCorNNDR()))
@@ -1082,24 +1135,27 @@ Transform RegistrationVis::computeTransformationImpl(
 						if(_guessMatchToProjection)
 						{
 							UDEBUG("match frame to projected");
-							// Create kd-tree for projected keypoints
-							rtflann::Matrix<float> cornersProjectedMat((float*)cornersProjected.data(), cornersProjected.size(), 2);
-							rtflann::Index<rtflann::L2_Simple<float> > index(cornersProjectedMat, rtflann::KDTreeIndexParams());
-							index.buildIndex();
+							// Index the projected keypoints. A rebalancing factor of 1:
+							// the index is thrown away with the frame, nothing is ever
+							// added to or removed from it. cv::Point2f being two floats,
+							// the points are indexed where they are.
+							cv::Mat cornersProjectedMat((int)cornersProjected.size(), 2, CV_32FC1, (void*)cornersProjected.data());
+							FlannIndex flannIndex;
+							flannIndex.buildIndex(FlannIndex::NANOFLANN_INDEX_KDTREE_SINGLE, cornersProjectedMat, false, 1.0f);
 
 							std::vector< std::vector<size_t> > indices;
 							std::vector<std::vector<float> > dists;
 							float radius = (float)_guessWinSize; // pixels
 							std::vector<cv::Point2f> pointsTo;
 							cv::KeyPoint::convert(kptsTo, pointsTo);
-							rtflann::Matrix<float> pointsToMat((float*)pointsTo.data(), pointsTo.size(), 2);
-							index.radiusSearch(pointsToMat, indices, dists, radius*radius, rtflann::SearchParams());
+							cv::Mat pointsToMat((int)pointsTo.size(), 2, CV_32FC1, (void*)pointsTo.data());
+							flannIndex.radiusSearch(pointsToMat, indices, dists, radius);
 
-							UASSERT(indices.size() == pointsToMat.rows);
+							UASSERT(indices.size() == (size_t)pointsToMat.rows);
 							UASSERT(descriptorsFrom.cols == descriptorsTo.cols);
 							UASSERT(descriptorsFrom.rows == (int)kptsFrom.size());
 							UASSERT((int)pointsToMat.rows == descriptorsTo.rows);
-							UASSERT(pointsToMat.rows == kptsTo.size());
+							UASSERT(pointsToMat.rows == (int)kptsTo.size());
 							UDEBUG("radius search done for guess");
 
 							// Process results (Nearest Neighbor Distance Ratio)
@@ -1107,9 +1163,21 @@ Transform RegistrationVis::computeTransformationImpl(
 							std::map<int,int> addedWordsFrom; //<id, index>
 							std::map<int, int> duplicates; //<fromId, toId>
 							int newWords = 0;
+							// The projected words that a keypoint of the frame was found
+							// near, as the other branch collects them: several keypoints
+							// can be near the same one, hence the set. OdometryF2M uses
+							// them to know which words of its map are still seen.
+							std::set<int> projectedIDs;
 							cv::Mat descriptors(10, descriptorsTo.cols, descriptorsTo.type());
-							for(unsigned int i = 0; i < pointsToMat.rows; ++i)
+							for(int i = 0; i < pointsToMat.rows; ++i)
 							{
+								for(unsigned int j=0; j<indices[i].size(); ++j)
+								{
+									const int projectedIndexFrom = projectedIndexToDescIndex[indices[i].at(j)];
+									projectedIDs.insert(!orignalWordsFromIds.empty()?
+											orignalWordsFromIds[projectedIndexFrom]:projectedIndexFrom);
+								}
+
 								int matchedIndex = -1;
 								if(indices[i].size() >= 2)
 								{
@@ -1200,9 +1268,10 @@ Transform RegistrationVis::computeTransformationImpl(
 									++newWords;
 								}
 							}
-							UDEBUG("addedWordsFrom=%d/%d (duplicates=%d, newWords=%d), kptsTo=%d, wordsTo=%d, words3From=%d",
+							info.projectedIDs = std::vector<int>(projectedIDs.begin(), projectedIDs.end());
+							UDEBUG("addedWordsFrom=%d/%d (duplicates=%d, newWords=%d), kptsTo=%d, wordsTo=%d, words3From=%d, projectedIDs=%d",
 								(int)addedWordsFrom.size(), (int)cornersProjected.size(), (int)duplicates.size(), newWords,
-								(int)kptsTo.size(), (int)wordsTo.size(), (int)words3From.size());
+								(int)kptsTo.size(), (int)wordsTo.size(), (int)words3From.size(), (int)info.projectedIDs.size());
 
 							// create fake ids for not matched words from "from"
 							int addWordsFromNotMatched = 0;
@@ -1224,25 +1293,29 @@ Transform RegistrationVis::computeTransformationImpl(
 						else
 						{
 							UDEBUG("match projected to frame");
+							// Index the frame's keypoints. A rebalancing factor of 1:
+							// the index is thrown away with the frame, nothing is ever
+							// added to or removed from it. cv::Point2f being two floats,
+							// the points are indexed where they are.
 							std::vector<cv::Point2f> pointsTo;
 							cv::KeyPoint::convert(kptsTo, pointsTo);
-							rtflann::Matrix<float> pointsToMat((float*)pointsTo.data(), pointsTo.size(), 2);
-							rtflann::Index<rtflann::L2_Simple<float> > index(pointsToMat, rtflann::KDTreeIndexParams());
-							index.buildIndex();
+							cv::Mat pointsToMat((int)pointsTo.size(), 2, CV_32FC1, (void*)pointsTo.data());
+							FlannIndex flannIndex;
+							flannIndex.buildIndex(FlannIndex::NANOFLANN_INDEX_KDTREE_SINGLE, pointsToMat, false, 1.0f);
 
-							std::vector< std::vector<size_t> > indices;
-							std::vector<std::vector<float> > dists;
+							cv::Mat queryMat((int)cornersProjected.size(), 2, CV_32FC1, (void*)cornersProjected.data());
+
+							std::vector<std::vector<size_t>> indices;
+							std::vector<std::vector<float>> dists;
 							float radius = (float)_guessWinSize; // pixels
-							rtflann::Matrix<float> cornersProjectedMat((float*)cornersProjected.data(), cornersProjected.size(), 2);
-							index.radiusSearch(cornersProjectedMat, indices, dists, radius*radius, rtflann::SearchParams(32, 0, false));
 
-							UASSERT(indices.size() == cornersProjectedMat.rows);
-							UASSERT(descriptorsFrom.cols == descriptorsTo.cols);
-							UASSERT(descriptorsFrom.rows == (int)kptsFrom.size());
+							flannIndex.radiusSearch(queryMat, indices, dists, radius, 0, 32, 0.0, false);
+
+							UASSERT(indices.size() == cornersProjected.size());
 							UASSERT((int)pointsToMat.rows == descriptorsTo.rows);
-							UASSERT(pointsToMat.rows == kptsTo.size());
+							UASSERT(pointsToMat.rows == (int)kptsTo.size());
 							UDEBUG("radius search done for guess");
-
+							
 							// Process results (Nearest Neighbor Distance Ratio)
 							std::set<int> addedWordsTo;
 							std::set<int> addedWordsFrom;
@@ -1250,7 +1323,7 @@ Transform RegistrationVis::computeTransformationImpl(
 							double bruteForceDescCopy = 0.0;
 							UTimer bruteForceTimer;
 							cv::Mat descriptors(10, descriptorsTo.cols, descriptorsTo.type());
-							for(unsigned int i = 0; i < cornersProjectedMat.rows; ++i)
+							for(unsigned int i = 0; i < cornersProjected.size(); ++i)
 							{
 								int matchedIndexFrom = projectedIndexToDescIndex[i];
 

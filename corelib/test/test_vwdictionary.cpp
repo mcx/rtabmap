@@ -20,6 +20,20 @@
 
 using namespace rtabmap;
 
+namespace {
+// Spelled out rather than taken from VWDictionary: the point is to check the
+// strategies that are expected to build an index, not to agree with whatever
+// the implementation classifies as one.
+bool hasFlannIndex(VWDictionary::NNStrategy strategy)
+{
+    return strategy == VWDictionary::kNNFlannNaive ||
+           strategy == VWDictionary::kNNFlannKdTree ||
+           strategy == VWDictionary::kNNFlannLSH ||
+           strategy == VWDictionary::kNNNanoFlannKdTree ||
+           strategy == VWDictionary::kNNFlannKdTreeSingle;
+}
+} // namespace
+
 class VWDictionaryTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -52,7 +66,9 @@ TEST_F(VWDictionaryTest, AddNewWordsIncremental)
         VWDictionary::kNNFlannKdTree,
         VWDictionary::kNNFlannLSH,
         VWDictionary::kNNBruteForce,
-        VWDictionary::kNNBruteForceGPU
+        VWDictionary::kNNBruteForceGPU,
+        VWDictionary::kNNNanoFlannKdTree,
+        VWDictionary::kNNFlannKdTreeSingle
     };
 
     // That will mke logic below works with numbers chosen
@@ -556,6 +572,8 @@ TEST_F(VWDictionaryTest, NNStrategyName)
     EXPECT_EQ(VWDictionary::nnStrategyName(VWDictionary::kNNFlannLSH), "FLANN LSH");
     EXPECT_EQ(VWDictionary::nnStrategyName(VWDictionary::kNNBruteForce), "BRUTE FORCE");
     EXPECT_EQ(VWDictionary::nnStrategyName(VWDictionary::kNNBruteForceGPU), "BRUTE FORCE GPU");
+    EXPECT_EQ(VWDictionary::nnStrategyName(VWDictionary::kNNNanoFlannKdTree), "NANOFLANN KD-TREE");
+    EXPECT_EQ(VWDictionary::nnStrategyName(VWDictionary::kNNFlannKdTreeSingle), "FLANN KD-TREE SINGLE");
     EXPECT_EQ(VWDictionary::nnStrategyName(VWDictionary::kNNUndef), "Unknown");
 }
 
@@ -631,7 +649,9 @@ TEST_F(VWDictionaryTest, SerializeDeserializeIndex)
         VWDictionary::kNNFlannKdTree,
         VWDictionary::kNNFlannLSH,
         VWDictionary::kNNBruteForce,
-        VWDictionary::kNNBruteForceGPU
+        VWDictionary::kNNBruteForceGPU,
+        VWDictionary::kNNNanoFlannKdTree,
+        VWDictionary::kNNFlannKdTreeSingle
     };
 
     for(VWDictionary::NNStrategy strategy : strategies)
@@ -680,22 +700,23 @@ TEST_F(VWDictionaryTest, SerializeDeserializeIndex)
         // Serialize
         std::vector<unsigned char> data = dict->serializeIndex();
 #ifdef _WIN32
-        // FlannIndex::serializeIndex() is not implemented on Windows
-        // (see corelib/src/FlannIndex.cpp), so it always returns empty
-        // data regardless of the strategy. Skip the rest of the
-        // round-trip assertions on Windows.
-        EXPECT_EQ(data.size(), 0u) << "Strategy: " << VWDictionary::nnStrategyName(strategy);
-        continue;
-#else
-        if(strategy < VWDictionary::kNNBruteForce)
+        // The rtflann serialization needs fmemopen, which Windows doesn't have
+        // (see FlannIndex::serializeIndex()): there, only the nanoflann index
+        // gives data back, the others are left out of the round trip below.
+        if(strategy != VWDictionary::kNNNanoFlannKdTree)
         {
-            // flann strategies
+            EXPECT_EQ(data.size(), 0u) << "Strategy: " << VWDictionary::nnStrategyName(strategy);
+            continue;
+        }
+#endif
+        if(hasFlannIndex(strategy))
+        {
             EXPECT_GT(data.size(), 0u) << "Strategy: " << VWDictionary::nnStrategyName(strategy);
         }
         else {
+            // brute force strategies have no index to serialize
             EXPECT_EQ(data.size(), 0u) << "Strategy: " << VWDictionary::nnStrategyName(strategy);
         }
-#endif
         
         // Create new dictionary and deserialize
         VWDictionary dict2;
@@ -722,9 +743,8 @@ TEST_F(VWDictionaryTest, SerializeDeserializeIndex)
         dict3.setNNStrategy(strategy);
         dict3.addNewWords(descriptors, 1);
         success = dict3.deserializeIndex(data);
-        if(strategy < VWDictionary::kNNBruteForce)
+        if(hasFlannIndex(strategy))
         {
-            // flann strategies
             EXPECT_TRUE(success) << "Strategy: " << VWDictionary::nnStrategyName(strategy);
 
             // Index should be loaded
@@ -1001,3 +1021,108 @@ TEST_F(VWDictionaryTest, FindNNWithVisualWords)
     }
 }
 
+
+// What Kp/ByteToFloat costs in matching quality. Both conversions feed the same
+// exact index, so any difference comes from the distance they induce: expanding
+// each bit to a float keeps the L1 distance equal to the Hamming distance,
+// while converting each byte to a float doesn't, one flipped bit moving a byte
+// by 1 or by 128 depending on which bit it is.
+TEST_F(VWDictionaryTest, ByteToFloatMatchingQuality)
+{
+    const int words = 200;
+    const int bytes = 32; // ORB
+    const int queries = 100;
+
+    cv::RNG rng(42);
+    cv::Mat descriptors(words, bytes, CV_8U);
+    rng.fill(descriptors, cv::RNG::UNIFORM, 0, 256);
+
+    int totalBitExpansion = 0;
+    int totalByteToFloat = 0;
+    // From a query a few bits away from its word, which any distance finds, to
+    // one almost as far as the others are from each other (two random 256 bits
+    // descriptors differ by about 128).
+    for(int flippedBits: {8, 32, 64, 96})
+    {
+        // Queries are indexed descriptors with bits flipped, the way the same
+        // feature looks when seen again.
+        cv::Mat queryDescriptors(queries, bytes, CV_8U);
+        for(int i=0; i<queries; ++i)
+        {
+            descriptors.row(rng.uniform(0, words)).copyTo(queryDescriptors.row(i));
+            for(int b=0; b<flippedBits; ++b)
+            {
+                queryDescriptors.at<unsigned char>(i, rng.uniform(0, bytes)) ^= (1 << rng.uniform(0, 8));
+            }
+        }
+
+        // Ground truth: the closest descriptor in Hamming distance.
+        std::vector<int> hammingNN(queries);
+        for(int i=0; i<queries; ++i)
+        {
+            int best = -1;
+            double bestDistance = -1;
+            for(int w=0; w<words; ++w)
+            {
+                const double distance = cv::norm(queryDescriptors.row(i), descriptors.row(w), cv::NORM_HAMMING);
+                if(best < 0 || distance < bestDistance)
+                {
+                    best = w;
+                    bestDistance = distance;
+                }
+            }
+            hammingNN[i] = best;
+        }
+
+        int correct[2] = {0, 0};
+        for(int byteToFloat=0; byteToFloat<2; ++byteToFloat)
+        {
+            VWDictionary dictionary;
+            ParametersMap params;
+            // An exact index, so that only the distance the conversion induces
+            // can change what is found.
+            params.insert(ParametersPair(Parameters::kKpNNStrategy(),
+                    uNumber2Str((int)VWDictionary::kNNFlannKdTreeSingle)));
+            params.insert(ParametersPair(Parameters::kKpIncrementalFlann(), "false"));
+            params.insert(ParametersPair(Parameters::kKpByteToFloat(), byteToFloat?"true":"false"));
+            params.insert(ParametersPair(Parameters::kKpNndrRatio(), "0.8"));
+            // One word per descriptor: without this, two of the random ones
+            // that happen to be close are merged as they are added.
+            params.insert(ParametersPair(Parameters::kKpNewWordsComparedTogether(), "false"));
+            dictionary.parseParameters(params);
+
+            const std::list<int> addedIds = dictionary.addNewWords(descriptors, 1);
+            ASSERT_EQ(addedIds.size(), (size_t)words) << "byteToFloat=" << byteToFloat;
+            dictionary.update();
+            ASSERT_EQ(dictionary.getVisualWords().size(), (size_t)words) << "byteToFloat=" << byteToFloat;
+
+            const std::vector<int> ids(addedIds.begin(), addedIds.end());
+            const std::vector<int> matched = dictionary.findNN(queryDescriptors);
+            ASSERT_EQ(matched.size(), (size_t)queries) << "byteToFloat=" << byteToFloat;
+            for(int i=0; i<queries; ++i)
+            {
+                if(matched[i] == ids[hammingNN[i]])
+                {
+                    ++correct[byteToFloat];
+                }
+            }
+        }
+
+        std::cerr << "[          ] " << flippedBits << "/" << bytes*8
+                  << " bits flipped: " << Parameters::kKpByteToFloat() << "=false found "
+                  << correct[0] << "/" << queries << " of the Hamming nearest neighbors, =true found "
+                  << correct[1] << "/" << queries << "\n";
+
+        // Expanding the bits keeps the Hamming ordering, so it finds what an
+        // exhaustive Hamming search finds; converting the bytes cannot do
+        // better than that.
+        EXPECT_EQ(correct[0], queries) << "flippedBits=" << flippedBits;
+        EXPECT_LE(correct[1], correct[0]) << "flippedBits=" << flippedBits;
+        totalBitExpansion += correct[0];
+        totalByteToFloat += correct[1];
+    }
+
+    // The distortion is what the parameter trades for its smaller descriptors:
+    // it shows once the true match is not much closer than the others.
+    EXPECT_LT(totalByteToFloat, totalBitExpansion);
+}
